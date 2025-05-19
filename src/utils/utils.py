@@ -183,5 +183,17 @@ def get_args():
         action='store_true',
         help="Set to compile the model with `torch.compile`"
     )
+    parser.add_argument(
+        "--experiment",
+        type=str,
+        default="experiment1",
+        help="Output directory for tensorboard logs"
+    )
+    parser.add_argument(
+        "--user",
+        type=str,
+        default="aoudrhiri",
+        help="User running the experiment"
+    )    
     args = parser.parse_args()
     return args

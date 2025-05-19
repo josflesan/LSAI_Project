@@ -4,17 +4,18 @@ import torch
 
 class IterableParquetDataset(IterableDataset):
     def __init__(
-    self,
-    parquet_file: str,
-    tokenizer,
-    sequence_length: int,
-    bos_token_id: int = 1
+        self,
+        parquet_file: str,
+        tokenizer,
+        sequence_length: int,
+        bos_token_id: int = 1
     ):
         self.parquet_ds = pq.read_table(parquet_file, memory_map=True)
         self.real_length = len(self.parquet_ds)
         self.tokenizer = tokenizer
         self.sequence_length = sequence_length
         self.bos_token_id = bos_token_id
+    
     def __iter__(self):
         # Reset buffer and index when starting a new iteration
         token_buffer = []

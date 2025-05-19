@@ -19,7 +19,6 @@ export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 ASSIGNMENT_DIR="/iopsstor/scratch/cscs/$USER/assignment-2"
 
 
-
 TRAINING_CMD="nsys profile -s none -w true \
 --trace='nvtx,cudnn,cublas,cuda' \
 --output=/iopsstor/scratch/cscs/$USER/assignment-2/nsys-trace.nsys-rep \

@@ -2,15 +2,18 @@ import os
 import time
 
 import torch
+from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
-from ..dataset.dataset import CollatorForCLM, ParquetDataset
+from dataset.dataset import CollatorForCLM, ParquetDataset
 from model.model import Transformer, TransformerModelArgs
 from utils.utils import build_lr_scheduler, clip_grad_norm_, get_args, get_num_params, get_num_flop_per_token, init_logger, logger, PRECISION_STR_TO_DTYPE, set_default_dtype
+from pathlib import Path
 
 def train(args):
   logger.info(f"Experiment args: {args}")
+
   # Init
   device = torch.device(f"cuda:{int(os.getenv('LOCAL_RANK', 0))}")
   model_dtype = PRECISION_STR_TO_DTYPE[args.model_dtype]
@@ -28,16 +31,16 @@ def train(args):
   # Set up Model
   logger.info("Setting up Model...")
   model_config = TransformerModelArgs(
-        dim=4096,
-        n_layers=32,
-        n_heads=32,
-        n_kv_heads=8,
-        ffn_dim_multiplier=1.3,
-        multiple_of=1024,
-        rope_theta=500000,
-        vocab_size=tokenizer.vocab_size,
-        seq_len=args.sequence_length,
-    )
+    dim=4096,
+    n_layers=32,
+    n_heads=32,
+    n_kv_heads=8,
+    ffn_dim_multiplier=1.3,
+    multiple_of=1024,
+    rope_theta=500000,
+    vocab_size=tokenizer.vocab_size,
+    seq_len=args.sequence_length,
+  )
   with set_default_dtype(model_dtype):
     model = Transformer(model_config).to(device)
   
@@ -86,6 +89,9 @@ def train(args):
     del logits
     loss.backward()
 
+    # Log loss to tensorboard
+    writer.add_scalar("Loss/train (CE)", loss, train_step)
+
     # Clip gradients
     clip_grad_norm_(model.parameters(), args.grad_max_norm)
 
@@ -110,10 +116,17 @@ def train(args):
     if args.profile and args.profile_step_end == train_step:
       torch.cuda.cudart().cudaProfilerStop()
 
-
   logger.info("Training completed")
 
 if __name__ == "__main__":
   init_logger()
   args = get_args()
+
+  # Create experiment directory if it doesn't exist
+  output_dir = Path(f"/iopsstor/scratch/cscs/{args.user}/LSAI_Project/logs/tensorboard/{args.experiment}")
+  if not output_dir.exists():
+    output_dir.mkdir(parents=True)
+
+  writer = SummaryWriter(output_dir)
   train(args)
+  writer.close()  # Close the Tensorboard writer
