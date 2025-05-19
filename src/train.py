@@ -5,9 +5,9 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
-from dataset import CollatorForCLM, ParquetDataset
-from model import Transformer, TransformerModelArgs
-from utils import build_lr_scheduler, clip_grad_norm_, get_args, get_num_params, get_num_flop_per_token, init_logger, logger, PRECISION_STR_TO_DTYPE, set_default_dtype
+from ..dataset.dataset import CollatorForCLM, ParquetDataset
+from model.model import Transformer, TransformerModelArgs
+from utils.utils import build_lr_scheduler, clip_grad_norm_, get_args, get_num_params, get_num_flop_per_token, init_logger, logger, PRECISION_STR_TO_DTYPE, set_default_dtype
 
 def train(args):
   logger.info(f"Experiment args: {args}")
