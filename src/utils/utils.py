@@ -5,6 +5,7 @@ import logging
 from contextlib import contextmanager
 
 import torch
+from torch.distributed.tensor import DTensor, Replicate
 from torch.optim.lr_scheduler import LambdaLR
 
 logger = logging.getLogger()
@@ -15,6 +16,13 @@ PRECISION_STR_TO_DTYPE = {
     "fp32": torch.float32,
     "fp64": torch.float64,
 }
+
+def verify_min_gpu_count(min_gpus: int = 2) -> bool:
+    """Verification that we have at least X gpus to run example"""
+    has_cuda = torch.cuda.is_available()
+    gpu_count = torch.cuda.device_count()
+
+    return has_cuda and gpu_count >= min_gpus
 
 def init_logger():
     logger.setLevel(logging.INFO)
@@ -82,11 +90,22 @@ def build_lr_scheduler(optimizer: torch.optim, warmup_steps: int):
     return LambdaLR(optimizer, lr_lambda)
     
 @torch.no_grad()
-def clip_grad_norm_(parameters, grad_max_norm):
-  grads = [p.grad for p in parameters if p.grad is not None]
-  total_norm = torch.nn.utils.get_total_norm(grads, error_if_nonfinite=True)
-  torch.nn.utils.clip_grads_with_norm_(parameters, grad_max_norm, total_norm)
-  return total_norm
+def clip_grad_norm_(parameters, grad_max_norm, device_mesh=None):
+    grads = []
+    for p in parameters:
+        if p.grad is None:
+            continue
+    
+        grad = p.grad
+        if not isinstance(grad, DTensor) and device_mesh:
+            if device_mesh is None:
+                raise ValueError("Need device_mesh to convert local Tensor to DTensor.")
+            grad = DTensor.from_local(grad, device_mesh, placements=[Replicate()])
+        grads.append(grad)
+
+    total_norm = torch.nn.utils.get_total_norm(grads, error_if_nonfinite=True)
+    torch.nn.utils.clip_grads_with_norm_(parameters, grad_max_norm, total_norm)
+    return total_norm
 
 @contextmanager
 def set_default_dtype(dtype: torch.dtype):
@@ -194,6 +213,23 @@ def get_args():
         type=str,
         default="aoudrhiri",
         help="User running the experiment"
-    )    
+    )
+    parser.add_argument(
+        "--tensor-parallel",
+        action="store_true",
+        help="Set to run model in Tensor Parallel mode"
+    )
+    parser.add_argument(
+        "--data-parallel",
+        action="store_true",
+        help="Set to run model in Data Parallel mode"
+    )
+    parser.add_argument(
+        "--tp-parallel-type",
+        type=str,
+        default="feedforward",
+        choices=["feedforward", "attention", "global"],
+        help="Type of Tensor Parallel Run to Kick Off"
+    )
     args = parser.parse_args()
     return args

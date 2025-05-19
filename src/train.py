@@ -1,17 +1,72 @@
 import os
 import time
+import random
+import sys
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel, parallelize_module
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from transformers import AutoTokenizer
 
 from dataset.dataset import CollatorForCLM, ParquetDataset
 from model.model import Transformer, TransformerModelArgs
-from utils.utils import build_lr_scheduler, clip_grad_norm_, get_args, get_num_params, get_num_flop_per_token, init_logger, logger, PRECISION_STR_TO_DTYPE, set_default_dtype
+from utils.utils import (
+  build_lr_scheduler,
+  clip_grad_norm_,
+  get_args,
+  get_num_params,
+  get_num_flop_per_token,
+  init_logger,
+  logger,
+  PRECISION_STR_TO_DTYPE,
+  set_default_dtype,
+  verify_min_gpu_count
+)
+from utils.distributed_utils import init_distributed, compare_tensors
 from pathlib import Path
 
-def train(args):
+# -------- GPU check --------
+
+_min_gpu_count = 1
+
+if not verify_min_gpu_count(min_gpus=_min_gpu_count):
+  print(f"Unable to locate sufficienct {_min_gpu_count} GPUs to run this example. Exiting.")
+  sys.exit()
+
+# ---------------------------
+
+# Distributed parameters
+RANK, LOCAL_RANK, WORLD_SIZE = (0, 0, 1)
+random.seed(32)
+torch.manual_seed(32)  #TODO: remove if running new experiment
+
+# Define layer TP plans
+# 1. Feedforward Transformer Block 
+# 2. Feedforward + Self-Attention Block
+# 3. Transformers + Embeddings + Output Linear
+feedforward_tp_plan = {
+  "feed_forward.w1": ColwiseParallel(),
+  "feed_forward.w2": RowwiseParallel(),
+  "feed_forward.w3": ColwiseParallel(),
+}
+
+attention_tp_plan = {
+  "attention.wq": ColwiseParallel(),
+  "attention.wk": ColwiseParallel(),
+  "attention.wv": ColwiseParallel(),
+  "attention.wo": RowwiseParallel(),
+}
+
+global_plan = {
+  "tok_embeddings": RowwiseParallel(),
+  "output": ColwiseParallel(),
+}
+
+
+def train(args, tp_mesh=None, dp_mesh=None):
   logger.info(f"Experiment args: {args}")
 
   # Init
@@ -48,6 +103,32 @@ def train(args):
     logger.info("Using `torch.compile`")
     model = torch.compile(model, fullgraph=True)
   
+  # Parallelize each feedforward layer in the transformer blocks
+  if args.tensor_parallel:
+
+    for layer_id, transformer_block in model.layers.items():
+      # Adjust attention module to use local number of heads
+      if args.tp_parallel_type == "attention":
+        attn_layer = transformer_block.attention
+        attn_layer.n_heads = attn_layer.n_heads // tp_mesh.size()
+        attn_layer.n_kv_heads = attn_layer.n_kv_heads // tp_mesh.size()
+        
+      parallelize_module(
+        module=transformer_block,
+        device_mesh=tp_mesh,
+        parallelize_plan=feedforward_tp_plan if args.tp_parallel_type == "feedforward" else {**feedforward_tp_plan , **attention_tp_plan},
+      )
+
+    if args.tp_parallel_type == "global":
+      model = parallelize_module(
+          model,
+          tp_mesh,
+          global_plan
+      )
+
+    if args.data_parallel:
+      model = FSDP(model, device_mesh=dp_mesh, use_orig_params=True)
+  
   model.train()
 
   # Build Optimizers & LR Scheduler
@@ -64,7 +145,8 @@ def train(args):
   ntraining_tokens_since_last_log = 0
   time_last_log = time.perf_counter()
 
-  logger.info("Starting training!")
+  if RANK == 0:
+    logger.info("Starting training!")
   train_step = 0
   while train_step < args.training_steps:
     train_step += 1
@@ -90,10 +172,11 @@ def train(args):
     loss.backward()
 
     # Log loss to tensorboard
-    writer.add_scalar("Loss/train (CE)", loss, train_step)
+    if RANK == 0:
+      writer.add_scalar("Loss/train (CE)", loss, train_step)
 
     # Clip gradients
-    clip_grad_norm_(model.parameters(), args.grad_max_norm)
+    clip_grad_norm_(model.parameters(), args.grad_max_norm, tp_mesh)
 
     optimizer.step()
     lr_scheduler.step()
@@ -107,7 +190,10 @@ def train(args):
       tflops = num_flop_per_token * tps / 1e12
       training_tps = ntraining_tokens_since_last_log / time_delta
 
-      logger.info(f"Step: {train_step} | Loss: {loss.item():.2f} | Tokens per second: {tps:.2f} | Training tokens per second (%): {100*training_tps/tps:.2f} | MFU (%): {mfu:.2f} | TFLOPs: {tflops:.2f}")
+      # Only print on one rank
+      if RANK == 0:
+        logger.info(f"Step: {train_step} | Loss: {loss.item():.2f} | Tokens per second: {tps:.2f} | Training tokens per second (%): {100*training_tps/tps:.2f} | MFU (%): {mfu:.2f} | TFLOPs: {tflops:.2f}")
+
       ntokens_since_last_log = 0
       ntraining_tokens_since_last_log = 0
       time_last_log = time.perf_counter()
@@ -116,17 +202,37 @@ def train(args):
     if args.profile and args.profile_step_end == train_step:
       torch.cuda.cudart().cudaProfilerStop()
 
-  logger.info("Training completed")
+  if RANK == 0:
+    logger.info("Training completed")
 
 if __name__ == "__main__":
   init_logger()
   args = get_args()
 
+  # Define device mesh
+  tp_mesh = None
+  dp_mesh = None
+  if args.tensor_parallel or args.data_parallel:
+    RANK, LOCAL_RANK, WORLD_SIZE = init_distributed()
+
+  if args.tensor_parallel:
+    device_mesh = init_device_mesh("cuda", (4,))  #TODO: programmatically set this?
+    tp_mesh = device_mesh
+
+  if args.data_parallel:
+    device_mesh = init_device_mesh("cuda", (4,))
+    dp_mesh = device_mesh
+
+  if args.tensor_parallel and args.data_parallel:
+    device_mesh = init_device_mesh("cuda", (4, 4), mesh_dim_names=("dp", "tp"))
+    dp_mesh = device_mesh["dp"]
+    tp_mesh = device_mesh["tp"]
+
   # Create experiment directory if it doesn't exist
   output_dir = Path(f"/iopsstor/scratch/cscs/{args.user}/LSAI_Project/logs/tensorboard/{args.experiment}")
   if not output_dir.exists():
-    output_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
   writer = SummaryWriter(output_dir)
-  train(args)
+  train(args, tp_mesh, dp_mesh)
   writer.close()  # Close the Tensorboard writer

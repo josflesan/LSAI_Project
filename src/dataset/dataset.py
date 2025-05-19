@@ -32,11 +32,12 @@ class CollatorForCLM:
     pad_token_id: int
     def __call__(self, examples: List[Dict[str, List[int]]]) -> Dict[str, torch.Tensor]:
         input_ids = torch.LongTensor([examples[i]["input_ids"] for i in range(len(examples))]) # (b, s+1)
-        print("input ids: ", input_ids)
         inputs = input_ids[:, :-1].clone()
         labels = input_ids[:, 1:]
+
         # For padding tokens, mask the loss
         labels[labels == self.pad_token_id] = -100
+        
         assert inputs.shape[1] == labels.shape[1] == self.sequence_length
         assert inputs.shape == labels.shape
         return inputs, labels
