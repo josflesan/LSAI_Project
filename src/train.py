@@ -98,8 +98,8 @@ def train(args, tp_mesh=None, dp_mesh=None):
     # Set up Model
     logger.info("Setting up Model...")
     model_config = TransformerModelArgs(
-        dim=4096,
-        n_layers=32,
+        dim=2048,
+        n_layers=8,
         n_heads=32,
         n_kv_heads=8,
         ffn_dim_multiplier=1.3,
@@ -264,14 +264,14 @@ if __name__ == "__main__":
         RANK, LOCAL_RANK, WORLD_SIZE = init_distributed()
 
     if args.tensor_parallel and args.data_parallel:
-        device_mesh = init_device_mesh("cuda", (2, 2), mesh_dim_names=("dp", "tp"))
+        device_mesh = init_device_mesh("cuda", (4, 4), mesh_dim_names=("dp", "tp"))
         dp_mesh = device_mesh["dp"]
         tp_mesh = device_mesh["tp"]
     elif args.tensor_parallel:
         device_mesh = init_device_mesh("cuda", (4,))
         tp_mesh = device_mesh
     elif args.data_parallel:
-        device_mesh = init_device_mesh("cuda", (4,))
+        device_mesh = init_device_mesh("cuda", (16,))
         dp_mesh = device_mesh
 
     # Create experiment directory if it doesn't exist

@@ -4,12 +4,12 @@
 #SBATCH --time=00:14:59
 #SBATCH --job-name=lsai
 #SBATCH --output=/iopsstor/scratch/cscs/%u/LSAI_Project/logs/runs/%x-%j.out
-#SBATCH --nodes=1
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=1
+#SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=72
 #SBATCH --mem=460000
-#SBATCH --environment=/users/aoudrhiri/scratch/ngc_pt_jan.toml     # Vanilla 25.01 PyTorch NGC Image 
+#SBATCH --environment=/users/jfleitas/scratch/ngc_pt_jan.toml     # Vanilla 25.01 PyTorch NGC Image 
 #SBATCH --no-requeue	# Prevent Slurm to requeue the job if the execution crashes (e.g. node failure) so we don't loose the logs
 
 # Stop the script if a command fails or if an undefined variable is used
@@ -49,17 +49,21 @@ echo \"[srun] rank=\$SLURM_PROCID host=\$(hostname) noderank=\$SLURM_NODEID loca
 torchrun \
   --nnodes="${SLURM_NNODES}" \
   --node_rank=\$SLURM_NODEID \
-  --nproc_per_node=1 \
+  --nproc_per_node=4 \
   --master_addr="${MASTER_ADDR}" \
   --master_port="${MASTER_PORT}" \
   /iopsstor/scratch/cscs/$USER/LSAI_Project/src/train.py \
-  --sequence-length 4096 \
-  --batch-size 1 \
+  --sequence-length 256 \
+  --batch-size 128 \
   --learning-rate 5e-5 \
   --lr-warmup-steps 10 \
-  --training-steps 1000 \
+  --training-steps 10 \
   --logging-frequency 5 \
-  --experiment baseline \
+  --data-parallel \
+  --tensor-parallel \
+  --tp-parallel-type global \
+  --experiment data_parallel \
+  --user jfleitas
 "
 
 srun bash -c "$CMD"
