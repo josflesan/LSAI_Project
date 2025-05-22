@@ -219,8 +219,13 @@ def train(args, tp_mesh=None, dp_mesh=None):
         # Logging
         if train_step == 1 or train_step % args.logging_frequency == 0:
             time_delta = time.perf_counter() - time_last_log
+            ntokens_tensor = torch.tensor(ntokens_since_last_log, device=device)
+            dist.all_reduce(ntokens_tensor, op=dist.ReduceOp.SUM)
+            global_ntokens = ntokens_tensor.item()
+            tps = global_ntokens / time_delta
+
             # tokens per second per device, abbreviated as tps
-            tps = ntokens_since_last_log / time_delta
+            # tps = ntokens_since_last_log / time_delta
             mfu = 100 * num_flop_per_token * tps / 989e12
             tflops = num_flop_per_token * tps / 1e12
             training_tps = ntraining_tokens_since_last_log / time_delta
