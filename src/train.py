@@ -4,6 +4,7 @@ import random
 import sys
 
 import torch
+import torch.distributed as dist
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 from torch.distributed.device_mesh import init_device_mesh
@@ -161,6 +162,10 @@ def train(args, tp_mesh=None, dp_mesh=None):
     ntraining_tokens_since_last_log = 0
     time_last_log = time.perf_counter()
 
+    # Reset peak memory stats
+    torch.cuda.reset_peak_memory_stats(device)
+    max_peak_memory = 0
+
     if RANK == 0:
         logger.info("Starting training!")
     train_step = 0
@@ -194,9 +199,16 @@ def train(args, tp_mesh=None, dp_mesh=None):
         del logits
         loss.backward()
 
+        # Track peak memory
+        peak_memory = torch.cuda.max_memory_allocated(device)  # in bytes
+        max_peak_memory = max(max_peak_memory, peak_memory)
+
         # Log loss to tensorboard
         if RANK == 0:
             writer.add_scalar("Loss/train (CE)", loss, train_step)
+            writer.add_scalar(
+                "Memory/Peak Memory (GB)", peak_memory / (1024**3), train_step
+            )
 
         # Clip gradients
         clip_grad_norm_(model.parameters(), args.grad_max_norm, tp_mesh)
@@ -226,6 +238,16 @@ def train(args, tp_mesh=None, dp_mesh=None):
         # Profiling
         if args.profile and args.profile_step_end == train_step:
             torch.cuda.cudart().cudaProfilerStop()
+
+    all_peak_memory = [torch.cuda.max_memory_allocated()]
+    all_peak_memory = torch.tensor(all_peak_memory, device=device)
+    dist.all_reduce(
+        all_peak_memory, op=dist.ReduceOp.MAX
+    )  # All reduce max to get the peak memory usage across ranks
+    if RANK == 0:
+        logger.info(
+            f"Global max peak memory across all ranks: {all_peak_memory.item() / (1024**3):.2f} GB"
+        )
 
     if RANK == 0:
         logger.info("Training completed")
