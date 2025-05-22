@@ -10,7 +10,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel, parallelize_module
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from transformers import AutoTokenizer
-
+from torch.distributed._tensor import Shard, Replicate
 from dataset.dataset import CollatorForCLM, ParquetDataset
 from model.model import Transformer, TransformerModelArgs
 from utils.utils import (
@@ -61,8 +61,12 @@ attention_tp_plan = {
 }
 
 global_plan = {
-  "tok_embeddings": RowwiseParallel(),
-  "output": ColwiseParallel(),
+  "tok_embeddings": RowwiseParallel(
+    input_layouts=Replicate()
+  ),
+  "output": ColwiseParallel(
+    output_layouts=Replicate()
+  ),
 }
 
 
@@ -94,21 +98,25 @@ def train(args, tp_mesh=None, dp_mesh=None):
     multiple_of=1024,
     rope_theta=500000,
     vocab_size=tokenizer.vocab_size,
+    max_seq_len=32768,
     seq_len=args.sequence_length,
   )
   with set_default_dtype(model_dtype):
-    model = Transformer(model_config).to(device)
+    model = Transformer(model_config).to("cuda")
   
   if args.compile:
     logger.info("Using `torch.compile`")
     model = torch.compile(model, fullgraph=True)
+  
+  # model.to(device)  
+
   
   # Parallelize each feedforward layer in the transformer blocks
   if args.tensor_parallel:
 
     for layer_id, transformer_block in model.layers.items():
       # Adjust attention module to use local number of heads
-      if args.tp_parallel_type == "attention":
+      if args.tp_parallel_type == "attention" or args.tp_parallel_type == "global":
         attn_layer = transformer_block.attention
         attn_layer.n_heads = attn_layer.n_heads // tp_mesh.size()
         attn_layer.n_kv_heads = attn_layer.n_kv_heads // tp_mesh.size()
@@ -126,9 +134,10 @@ def train(args, tp_mesh=None, dp_mesh=None):
           global_plan
       )
 
+
     if args.data_parallel:
       model = FSDP(model, device_mesh=dp_mesh, use_orig_params=True)
-  
+
   model.train()
 
   # Build Optimizers & LR Scheduler
@@ -166,8 +175,10 @@ def train(args, tp_mesh=None, dp_mesh=None):
     optimizer.zero_grad()
 
     logits = model(input_ids)
+    
+    # Compute loss with properly shaped tensors
     loss = torch.nn.functional.cross_entropy(logits.flatten(0, 1).float(), labels.flatten(0, 1), reduction="sum")
-    loss = loss / num_items_in_batch
+    loss = loss / num_items_in_batch # Use actual number of elements in case we truncated
     del logits
     loss.backward()
 
@@ -191,8 +202,8 @@ def train(args, tp_mesh=None, dp_mesh=None):
       training_tps = ntraining_tokens_since_last_log / time_delta
 
       # Only print on one rank
-      if RANK == 0:
-        logger.info(f"Step: {train_step} | Loss: {loss.item():.2f} | Tokens per second: {tps:.2f} | Training tokens per second (%): {100*training_tps/tps:.2f} | MFU (%): {mfu:.2f} | TFLOPs: {tflops:.2f}")
+      # if RANK == 0:
+      logger.info(f"Step: {train_step} | Loss: {loss.item():.2f} | Tokens per second: {tps:.2f} | Training tokens per second (%): {100*training_tps/tps:.2f} | MFU (%): {mfu:.2f} | TFLOPs: {tflops:.2f}")
 
       ntokens_since_last_log = 0
       ntraining_tokens_since_last_log = 0
@@ -215,18 +226,17 @@ if __name__ == "__main__":
   if args.tensor_parallel or args.data_parallel:
     RANK, LOCAL_RANK, WORLD_SIZE = init_distributed()
 
-  if args.tensor_parallel:
-    device_mesh = init_device_mesh("cuda", (4,))  #TODO: programmatically set this?
+  if args.tensor_parallel and args.data_parallel:
+    device_mesh = init_device_mesh("cuda", (2, 2), mesh_dim_names=("dp", "tp"))
+    dp_mesh = device_mesh["dp"]
+    tp_mesh = device_mesh["tp"]
+  elif args.tensor_parallel:
+    device_mesh = init_device_mesh("cuda", (4,))
     tp_mesh = device_mesh
-
-  if args.data_parallel:
+  elif args.data_parallel:
     device_mesh = init_device_mesh("cuda", (4,))
     dp_mesh = device_mesh
 
-  if args.tensor_parallel and args.data_parallel:
-    device_mesh = init_device_mesh("cuda", (4, 4), mesh_dim_names=("dp", "tp"))
-    dp_mesh = device_mesh["dp"]
-    tp_mesh = device_mesh["tp"]
 
   # Create experiment directory if it doesn't exist
   output_dir = Path(f"/iopsstor/scratch/cscs/{args.user}/LSAI_Project/logs/tensorboard/{args.experiment}")

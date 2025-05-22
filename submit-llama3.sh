@@ -53,15 +53,14 @@ torchrun \
   --master_addr="${MASTER_ADDR}" \
   --master_port="${MASTER_PORT}" \
   /iopsstor/scratch/cscs/$USER/LSAI_Project/src/train.py \
-  --sequence-length 4096 \
-  --batch-size 1 \
+  --sequence-length 256 \
+  --batch-size 8 \
   --learning-rate 5e-5 \
   --lr-warmup-steps 10 \
   --training-steps 1000 \
   --logging-frequency 5 \
-  --experiment tp_attention \
-  --tensor-parallel \
-  --tp-parallel-type attention
+  --experiment only_dp \
+  --data-parallel \
 "
 
 srun bash -c "$CMD"

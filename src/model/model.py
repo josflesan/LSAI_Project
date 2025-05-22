@@ -16,6 +16,7 @@ class TransformerModelArgs:
     norm_eps: float = 1e-5
     rope_theta: float = 10000
     norm_type: str = "rmsnorm"
+    max_seq_len: int = 32768
     seq_len: int = 2048 # defined later by config
     vocab_size: int = -1  # defined later by tokenizer
     
@@ -89,6 +90,7 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Ten
     assert 0 <= 1 < ndim
     seqlen = x.shape[1]
     freqs_cis = freqs_cis[0:seqlen]
+    
     assert freqs_cis.shape == (seqlen, x.shape[-1])
     shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(*shape)
@@ -348,7 +350,7 @@ class Transformer(nn.Module):
     def _precompute_freqs_cis(self) -> torch.Tensor:
         return precompute_freqs_cis(
             self.model_args.dim // self.model_args.n_heads,
-            self.model_args.seq_len,
+            self.model_args.max_seq_len * 2,  # Be conservative about sequence length
             self.model_args.rope_theta,
         )
 
