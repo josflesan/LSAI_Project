@@ -6,7 +6,7 @@
 #SBATCH --output=/iopsstor/scratch/cscs/%u/LSAI_Project/logs/runs/%x-%j.out
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=4
+#SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=72
 #SBATCH --mem=460000
 #SBATCH --environment=/users/aoudrhiri/scratch/ngc_pt_jan.toml     # Vanilla 25.01 PyTorch NGC Image 
@@ -49,18 +49,17 @@ echo \"[srun] rank=\$SLURM_PROCID host=\$(hostname) noderank=\$SLURM_NODEID loca
 torchrun \
   --nnodes="${SLURM_NNODES}" \
   --node_rank=\$SLURM_NODEID \
-  --nproc_per_node=4 \
+  --nproc_per_node=1 \
   --master_addr="${MASTER_ADDR}" \
   --master_port="${MASTER_PORT}" \
   /iopsstor/scratch/cscs/$USER/LSAI_Project/src/train.py \
-  --sequence-length 256 \
-  --batch-size 8 \
+  --sequence-length 4096 \
+  --batch-size 1 \
   --learning-rate 5e-5 \
   --lr-warmup-steps 10 \
   --training-steps 1000 \
   --logging-frequency 5 \
-  --experiment only_dp \
-  --data-parallel \
+  --experiment baseline \
 "
 
 srun bash -c "$CMD"
